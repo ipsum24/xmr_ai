@@ -1,0 +1,21 @@
+{
+  "name": "wusdt-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "wUSDT Treasury platform — wrapped-USDT mint/burn engine, autonomous orchestrator, treasury vault and lending book",
+  "workspaces": [
+    "shared",
+    "services/api",
+    "apps/dashboard"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev -w services/api",
+    "dev:web": "npm run dev -w apps/dashboard",
+    "prisma:generate": "npm run prisma:generate -w services/api",
+    "prisma:push": "npm run prisma:push -w services/api",
+    "typecheck": "npm run typecheck -w services/api && npm run typecheck -w apps/dashboard"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

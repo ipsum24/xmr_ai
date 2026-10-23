@@ -1,0 +1,209 @@
+# wUSDT platform — local development stack.
+#
+# One Anvil chain per EVM chain in the registry (each with its real chain id, so
+# the BSC 18-decimal path is exercised for real), Postgres as the platform ledger,
+# the API, and the console. Everything runs from THIS checkout: the app services
+# bind-mount the repo and run their dev servers, with dependencies installed into
+# a named volume at startup. Nothing here runs a prebuilt application image.
+#
+#   docker compose up -d --build        → console on http://localhost:3000
+#
+# Live mode (real chains) is a configuration change, not a different build:
+# CHAIN_MODE=live plus the per-chain RPCs and custody key from the secret store.
+
+x-node-app: &node-app
+  image: node:22
+  working_dir: /workspace
+  volumes:
+    - "${BASE44_PROJECT_ROOT:-.}:/workspace"
+    - node_modules:/workspace/node_modules
+  env_file:
+    # Dev placeholders first, real secrets last: a value from the platform's
+    # secret store always wins over these.
+    - path: ./.env.dev-defaults
+      required: true
+    - path: /run/base44/app.env
+      required: false
+
+x-api-env: &api-env
+  DATABASE_URL: postgresql://wusdt:wusdt@postgres:5432/wusdt
+  CHAIN_MODE: "${CHAIN_MODE:-devnet}"
+  CHAIN_TARGETS: "ethereum,bsc,arbitrum,polygon"
+  ANVIL_RPC_ETHEREUM: http://anvil-ethereum:8545
+  ANVIL_RPC_BSC: http://anvil-bsc:8545
+  ANVIL_RPC_ARBITRUM: http://anvil-arbitrum:8545
+  ANVIL_RPC_POLYGON: http://anvil-polygon:8545
+  CONTRACTS_DIR: /workspace/contracts/src
+  PORT: "4000"
+  ADMIN_EMAIL: "${ADMIN_EMAIL:-quantumxx0@gmail.com}"
+  TREASURY_VAULT_TARGET_USD: "10000000"
+  APP_WALLET_DISTRIBUTION_BPS: "2500"
+  DEVNET_CONFIRMATIONS: "1"
+  BASE44_PREVIEW_MODE:
+
+services:
+  # ── infrastructure ────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: on-failure
+    environment:
+      POSTGRES_USER: wusdt
+      POSTGRES_PASSWORD: wusdt
+      POSTGRES_DB: wusdt
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wusdt -d wusdt"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  anvil-ethereum:
+    image: ghcr.io/foundry-rs/foundry:latest
+    restart: on-failure
+    entrypoint: ["anvil"]
+    command: ["--host", "0.0.0.0", "--port", "8545", "--chain-id", "1", "--accounts", "50"]
+    healthcheck:
+      test: ["CMD-SHELL", "cast block-number --rpc-url http://127.0.0.1:8545"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  anvil-bsc:
+    image: ghcr.io/foundry-rs/foundry:latest
+    restart: on-failure
+    entrypoint: ["anvil"]
+    # chain id 56 with 18-decimal USDT — the decimals trap is exercised here
+    command: ["--host", "0.0.0.0", "--port", "8545", "--chain-id", "56", "--accounts", "50"]
+    healthcheck:
+      test: ["CMD-SHELL", "cast block-number --rpc-url http://127.0.0.1:8545"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  anvil-arbitrum:
+    image: ghcr.io/foundry-rs/foundry:latest
+    restart: on-failure
+    entrypoint: ["anvil"]
+    command: ["--host", "0.0.0.0", "--port", "8545", "--chain-id", "42161", "--accounts", "50"]
+    healthcheck:
+      test: ["CMD-SHELL", "cast block-number --rpc-url http://127.0.0.1:8545"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  anvil-polygon:
+    image: ghcr.io/foundry-rs/foundry:latest
+    restart: on-failure
+    entrypoint: ["anvil"]
+    command: ["--host", "0.0.0.0", "--port", "8545", "--chain-id", "137", "--accounts", "50"]
+    healthcheck:
+      test: ["CMD-SHELL", "cast block-number --rpc-url http://127.0.0.1:8545"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  # ── dependency install (one-shot, into the node_modules volume) ───────────
+  install:
+    <<: *node-app
+    restart: "no"
+    command:
+      - sh
+      - -ec
+      - |
+        npm install --no-audit --no-fund
+        npx prisma generate --schema services/api/prisma/schema.prisma
+
+  # ── schema + seed (one-shot) ──────────────────────────────────────────────
+  migrate:
+    <<: *node-app
+    restart: "no"
+    environment: *api-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      install:
+        condition: service_completed_successfully
+    command:
+      - sh
+      - -ec
+      - |
+        npx prisma db push --skip-generate --schema services/api/prisma/schema.prisma
+        npx tsx services/api/prisma/seed.ts
+
+  # ── API ───────────────────────────────────────────────────────────────────
+  api:
+    <<: *node-app
+    restart: on-failure
+    environment: *api-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      anvil-ethereum:
+        condition: service_healthy
+      anvil-bsc:
+        condition: service_healthy
+      anvil-arbitrum:
+        condition: service_healthy
+      anvil-polygon:
+        condition: service_healthy
+    command: ["sh", "-ec", "exec npm run dev -w services/api"]
+    labels:
+      base44.project: "wUSDT API"
+      base44.kind: "api"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:4000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # ── console (the user-facing entry point, host port 3000) ────────────────
+  web:
+    <<: *node-app
+    restart: on-failure
+    environment:
+      # One origin: the dev server proxies /api to the API service, so the
+      # session cookie stays first-party and no CORS is needed.
+      VITE_API_PROXY_TARGET: http://api:4000
+      # Vite ≥ 6.1 appends this (set by the platform) to its allowed hosts.
+      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS:
+      BASE44_PREVIEW_MODE:
+      NODE_ENV: development
+    depends_on:
+      install:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+    command: ["sh", "-ec", "exec npm run dev -w apps/dashboard -- --host 0.0.0.0 --port 3000"]
+    ports:
+      - "3000:3000"
+    labels:
+      base44.project: "wUSDT console"
+      base44.kind: "web"
+      base44.port: "3000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  pgdata:
+  node_modules:

@@ -1,0 +1,214 @@
+// wUSDT platform schema.
+//
+// Amounts are raw integers stored as strings (uint256 does not fit in a JS
+// number, and BSC's USDT has 18 decimals). A transaction hash is WRITE-ONCE and
+// is only ever attached by the broadcaster — there is no API that accepts a
+// hash as input.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model AdminUser {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String?
+  passwordHash String?
+  totpSecret   String?
+  createdAt    DateTime  @default(now())
+  lastLoginAt  DateTime?
+  sessions     Session[]
+  auditLogs    AuditLog[]
+  transactions Transaction[]
+}
+
+model Session {
+  id        String    @id
+  adminId   String
+  issuedAt  DateTime  @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+  userAgent String?
+  admin     AdminUser @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId])
+}
+
+model ChainDeployment {
+  chain        String    @id
+  chainId      Int
+  mode         String // devnet | live
+  rpcUrl       String
+  explorerBase String? // null on a local devnet — no public explorer to link to
+  usdt         String
+  usdtDecimals Int
+  wusdt        String
+  wusdtDecimals Int
+  dexRouter    String
+  dexName      String
+  governor     String
+  deployedAt   DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  wallets      Wallet[]
+}
+
+model Wallet {
+  id              String         @id @default(cuid())
+  chain           String
+  address         String
+  label           String
+  kind            String // treasury | app
+  derivationIndex Int
+  createdAt       DateTime       @default(now())
+  deployment      ChainDeployment @relation(fields: [chain], references: [chain])
+  balances        TokenBalance[]
+
+  @@unique([chain, address])
+  @@index([chain, kind])
+}
+
+model TokenBalance {
+  id        String   @id @default(cuid())
+  walletId  String
+  tokenId   String // contract address
+  symbol    String
+  decimals  Int
+  available String // raw integer
+  updatedAt DateTime @updatedAt
+  wallet    Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@unique([walletId, tokenId])
+}
+
+model Transaction {
+  id                 String    @id @default(cuid())
+  chain              String
+  direction          String // mint | burn | approve | transfer_out | swap | liquidate_forward | lending
+  status             String    @default("pending_broadcast") // pending_broadcast | broadcasting | confirmed | failed
+  hash               String?   @unique
+  hashSource         String? // broadcaster:evm | broadcaster:tron
+  fromAddress        String
+  toAddress          String
+  amount             String // raw integer
+  tokenId            String
+  tokenSymbol        String
+  decimals           Int
+  blockNumber        Int?
+  gasUsed            String?
+  confirmations      Int       @default(0)
+  confirmedAt        DateTime?
+  explorerUrl        String?
+  failureReason      String?
+  adminInitiated     Boolean   @default(true)
+  initiatedByAdminId String?
+  note               String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  admin              AdminUser? @relation(fields: [initiatedByAdminId], references: [id])
+  deliveries         WebhookDelivery[]
+
+  @@index([status, chain])
+  @@index([createdAt])
+}
+
+model MintCycle {
+  id             String    @id @default(cuid())
+  chain          String
+  cycleIndex     Int
+  targetRaw      String
+  attestedRaw    String    @default("0")
+  mintedRaw      String    @default("0")
+  distributedRaw String    @default("0")
+  mintTxId       String?
+  status         String    @default("running") // running | completed | skipped | failed
+  error          String?
+  startedAt      DateTime  @default(now())
+  completedAt    DateTime?
+
+  @@unique([chain, cycleIndex])
+}
+
+model CollateralAsset {
+  id          String  @id @default(cuid())
+  chain       String
+  address     String
+  symbol      String
+  name        String
+  decimals    Int
+  priceRaw8   String // oracle price, 8 decimals
+  haircutBps  Int
+  ltvBps      Int
+  approved    Boolean @default(true)
+
+  @@unique([chain, address])
+}
+
+model Loan {
+  id                String    @id @default(cuid())
+  chain             String
+  borrowerAddress   String
+  borrowerWalletId  String?
+  collateralToken   String
+  collateralSymbol  String
+  collateralDecimals Int
+  collateralAmount  String
+  principalRaw      String
+  aprBps            Int
+  term              String
+  interestDueRaw    String
+  totalRepayRaw     String
+  ltvBps            Int
+  startAt           DateTime  @default(now())
+  maturityAt        DateTime
+  status            String    @default("active") // active | repaid | liquidatable | liquidated
+  repaidAt          DateTime?
+  repaidRaw         String?
+  disbursementTxId  String?
+  repaymentTxId     String?
+  createdAt         DateTime  @default(now())
+
+  @@index([chain, status])
+}
+
+model WebhookSubscription {
+  id           String            @id @default(cuid())
+  url          String
+  secret       String
+  events       String[]
+  active       Boolean           @default(true)
+  createdAt    DateTime          @default(now())
+  deliveries   WebhookDelivery[]
+}
+
+model WebhookDelivery {
+  id             String   @id @default(cuid())
+  subscriptionId String
+  transactionId  String?
+  event          String
+  status         String   @default("pending") // pending | delivered | failed
+  attempts       Int      @default(0)
+  responseCode   Int?
+  error          String?
+  createdAt      DateTime @default(now())
+  deliveredAt    DateTime?
+  subscription   WebhookSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  transaction    Transaction?        @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+}
+
+model AuditLog {
+  id        String    @id @default(cuid())
+  adminId   String?
+  action    String
+  detail    String?
+  createdAt DateTime  @default(now())
+  admin     AdminUser? @relation(fields: [adminId], references: [id])
+
+  @@index([createdAt])
+}

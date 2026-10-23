@@ -1,0 +1,19 @@
+node_modules/
+dist/
+build/
+.vite/
+*.log
+npm-debug.log*
+
+# local env — the platform delivers managed secrets via /run/base44/app.env
+.env
+.env.local
+.env.*.local
+!.env.example
+!.env.base44-defaults
+
+# generated
+services/api/prisma/generated/
+contracts/cache/
+contracts/out/
+.DS_Store
