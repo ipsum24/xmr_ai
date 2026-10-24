@@ -12,6 +12,7 @@
     "launch:preflight": "tsx scripts/launch/preflight.ts",
     "launch:deploy": "tsx scripts/launch/deploy-fleet.ts",
     "launch:verify": "tsx scripts/launch/verify-fleet.ts",
+    "launch:gas": "tsx scripts/launch/gas-forward.ts",
     "launch:smoke": "tsx scripts/launch/smoke-cycle.ts",
     "typecheck": "tsc --noEmit"
   },

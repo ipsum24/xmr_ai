@@ -50,6 +50,33 @@ Reads every assertion back from mainnet: USDT decimals, deployed wUSDT identity
 launch governance, DEX router has code, custody holds gas, and the reserve
 invariant `wUSDT.totalSupply() ≤ custodied USDT`. Any mismatch stops the launch.
 
+## 3 — gas float (`gas-forward.ts`, broadcasts native value)
+
+Every wallet here signs its own transactions, so every wallet has to be able to
+pay its own gas. This step forwards a native-gas float from the custody key to
+each recipient on all four chains — recipients are `GAS_FORWARD_TO_<CHAIN>`, else
+`GAS_FORWARD_TO`, else `APP_WALLET_ADDRESSES`:
+
+- the float is sized from **live fee data** (`getFeeData`) ×
+  `GAS_FLOAT_TRANSFERS` (default 10) × 65 000 gas per transfer — no hardcoded
+  prices, and a zero/stale fee answer is a hard stop;
+- idempotent — a wallet already holding the float is skipped, so a re-run sends
+  nothing;
+- fail-closed — live mode only, the chain must answer with the registry chain id,
+  and custody must still cover its own launch budget (`50 000 000` gas at the
+  same live fee) *after* the float, otherwise **nothing** is broadcast on that
+  chain;
+- after the top-up it asserts each recipient can now pay for a wUSDT transfer at
+  current fees, and re-reads every balance to confirm the float landed.
+
+Run it after Gate 2 (the fleet is deployed) and before Gate 4, so the app wallets
+and the ops address can pay for the transfers the smoke cycle and the console
+make from them:
+
+```bash
+docker compose exec -T api npx tsx services/api/scripts/launch/gas-forward.ts
+```
+
 ## 4 — smoke cycle (`smoke-cycle.ts`, real funds, small)
 
 Per chain, using the platform's own engines (not a reimplementation):
@@ -75,13 +102,15 @@ governor multisig has raised the caps.
 |---|---|---|
 | `CHAIN_MODE=live` | all | the platform's live chain mode |
 | `NODE_ENV=production` | all | activates the runtime guard (`assertRuntimeMode`) |
-| `LIVE_SIGNER_PRIVATE_KEY` | 1, 2, 4 | custody key: pays gas, holds the minter role |
+| `LIVE_SIGNER_PRIVATE_KEY` | 1, 2, 3, 4 | custody key: pays the gas float, holds the minter role |
 | `ETH_RPC` `BSC_RPC` `ARB_RPC` `POLY_RPC` | all | mainnet endpoints (same names live mode reads) |
 | `ETH_RPC_2` … (optional) | 4 | second endpoint for the independent receipt re-read |
 | `LAUNCH_GOVERNOR` (optional) | 1, 2 | multisig that receives governance |
 | `WUSDT_<CHAIN>` | 1 (skip), 2, 4 | deployed wUSDT address — Gate 1 prints it |
 | `SWAP_ROUTER_<CHAIN>`, `SWAP_DEX_<CHAIN>` | 2, 4 | the chain's real DEX router and its name |
 | `APP_WALLET_ADDRESSES` | 3, 4 | comma-separated app wallet addresses |
+| `GAS_FORWARD_TO`, `GAS_FORWARD_TO_<CHAIN>` (optional) | 3 | gas-float recipients, chain override first; defaults to `APP_WALLET_ADDRESSES` |
+| `GAS_FLOAT_TRANSFERS` (optional, default 10) | 3 | transfers the forwarded float must cover |
 | `GATE4_EXTERNAL_ADDRESS` | 4 | ops-owned address the smoke cycle transfers out to |
 | `DATABASE_URL` | 4 | platform ledger |
 

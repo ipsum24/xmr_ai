@@ -85,6 +85,18 @@ export function gate4Recipient(): string {
   return env("GATE4_EXTERNAL_ADDRESS");
 }
 
+/**
+ * Wallets that receive the native-gas float on a chain: `GAS_FORWARD_TO_<CHAIN>`
+ * overrides `GAS_FORWARD_TO`, which falls back to the app wallets. These are the
+ * addresses that sign and pay for their own transactions, so each needs gas of
+ * its own — the custody key never pays a third party's fee for it.
+ */
+export function gasForwardTargets(chain: ChainName): string[] {
+  const scoped = env(`GAS_FORWARD_TO_${chain.toUpperCase()}`);
+  const raw = scoped || env("GAS_FORWARD_TO") || env("APP_WALLET_ADDRESSES");
+  return [...new Set(raw.split(",").map((address) => address.trim()).filter(Boolean))];
+}
+
 export function label(chain: ChainName): string {
   return CHAIN_REGISTRY[chain].label;
 }
