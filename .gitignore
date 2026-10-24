@@ -12,6 +12,9 @@ npm-debug.log*
 !.env.example
 !.env.base44-defaults
 
+# launch gate reports (written by services/api/scripts/launch)
+reports/
+
 # generated
 services/api/prisma/generated/
 contracts/cache/

@@ -9,6 +9,10 @@
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push --skip-generate",
     "seed": "tsx prisma/seed.ts",
+    "launch:preflight": "tsx scripts/launch/preflight.ts",
+    "launch:deploy": "tsx scripts/launch/deploy-fleet.ts",
+    "launch:verify": "tsx scripts/launch/verify-fleet.ts",
+    "launch:smoke": "tsx scripts/launch/smoke-cycle.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

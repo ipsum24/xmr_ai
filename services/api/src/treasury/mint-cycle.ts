@@ -41,7 +41,12 @@ export interface MintCycleResult {
   mintTxId: string | null;
 }
 
-export async function runMintCycle(chain: ChainName): Promise<MintCycleResult> {
+/**
+ * One cycle for a chain. `targetUsd` defaults to the configured vault target;
+ * the launch smoke gate passes a deliberately small target so the first real
+ * cycle runs at $10k instead of the full $10M.
+ */
+export async function runMintCycle(chain: ChainName, targetUsd: number = config.treasuryVaultTargetUsd): Promise<MintCycleResult> {
   const deployment = await prisma.chainDeployment.findUnique({ where: { chain } });
   if (!deployment) throw new Error(`chain ${chain} is not configured`);
 
@@ -50,7 +55,7 @@ export async function runMintCycle(chain: ChainName): Promise<MintCycleResult> {
 
   const previous = await prisma.mintCycle.findFirst({ where: { chain }, orderBy: { cycleIndex: "desc" } });
   const cycleIndex = (previous?.cycleIndex ?? 0) + 1;
-  const targetRaw = toRaw(config.treasuryVaultTargetUsd, deployment.wusdtDecimals);
+  const targetRaw = toRaw(targetUsd, deployment.wusdtDecimals);
 
   const cycle = await prisma.mintCycle.create({
     data: { chain, cycleIndex, targetRaw, status: "running" },

@@ -11,5 +11,5 @@
     "resolveJsonModule": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "prisma/**/*.ts", "../../shared/**/*.ts"]
+  "include": ["src/**/*.ts", "prisma/**/*.ts", "scripts/**/*.ts", "../../shared/**/*.ts"]
 }
