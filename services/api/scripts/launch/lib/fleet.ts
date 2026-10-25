@@ -69,6 +69,8 @@ export const VAULT_ABI = [
 export interface CompiledContract {
   abi: readonly unknown[];
   bytecode: string;
+  standardInput: Record<string, unknown>;
+  compilerVersion: string;
 }
 
 /** solc, straight from the repo sources — the bytecode the gates deploy. */
@@ -92,7 +94,12 @@ function compileSources(sources: Record<string, string>, file: string, contract:
   const bytecode = artifact?.evm?.bytecode?.object;
   if (!bytecode) throw new Error(`${contract} did not compile from ${file}`);
 
-  return { abi: artifact.abi, bytecode: `0x${bytecode}` };
+  return {
+    abi: artifact.abi,
+    bytecode: `0x${bytecode}`,
+    standardInput: input,
+    compilerVersion: `v${solc.version().split(".Emscripten")[0]}`,
+  };
 }
 
 let compiledWusdt: CompiledContract | null = null;

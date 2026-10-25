@@ -9,6 +9,9 @@
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push --skip-generate",
     "seed": "tsx prisma/seed.ts",
+    "deploy": "tsx scripts/launch/deploy-autonomous.ts",
+    "test:deployment": "node --import tsx --test --test-concurrency=1 scripts/launch/deployment.test.ts",
+    "test:contracts": "node --import tsx --test --test-concurrency=1 scripts/launch/contracts.test.ts",
     "launch:preflight": "tsx scripts/launch/preflight.ts",
     "launch:deploy": "tsx scripts/launch/deploy-fleet.ts",
     "launch:verify": "tsx scripts/launch/verify-fleet.ts",
@@ -18,6 +21,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "^3.750.0",
+    "@aws-sdk/client-secrets-manager": "^3.750.0",
     "@prisma/client": "^5.20.0",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.6",

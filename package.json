@@ -9,6 +9,8 @@
     "apps/dashboard"
   ],
   "scripts": {
+    "deploy": "npm run deploy -w services/api --",
+    "deploy:check": "npm run deploy -w services/api -- --check",
     "dev:api": "npm run dev -w services/api",
     "dev:web": "npm run dev -w apps/dashboard",
     "prisma:generate": "npm run prisma:generate -w services/api",

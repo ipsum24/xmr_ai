@@ -140,8 +140,9 @@ contract WrappedUSDT {
      * @notice Point the token at its minter. In production this is the
      *         TreasuryVault contract, so no EOA can create supply.
      */
-    function setMinter(address newMinter) external onlyGovernor {
-        require(newMinter != address(0), "minter zero");
+    function setMinter(address newMinter) public onlyGovernor {
+        require(newMinter.code.length > 0, "minter must be a contract");
+        if (newMinter == minter) return;
         if (minter != address(0)) {
             _revoke(MINTER_ROLE, minter);
         }
@@ -154,6 +155,7 @@ contract WrappedUSDT {
     ///         governor keeps no authority — that is the launch hand-over.
     function setGovernor(address newGovernor) external onlyGovernor {
         require(newGovernor != address(0), "governor zero");
+        if (newGovernor == governor) return;
         _grant(ADMIN_ROLE, newGovernor);
         _grant(PAUSER_ROLE, newGovernor);
         _revoke(ADMIN_ROLE, governor);
@@ -163,11 +165,17 @@ contract WrappedUSDT {
     }
 
     function grantRole(bytes32 role, address account) external onlyGovernor {
-        _grant(role, account);
+        // Both administrative entry points preserve a single contract minter.
+        if (role == MINTER_ROLE) setMinter(account);
+        else _grant(role, account);
     }
 
     function revokeRole(bytes32 role, address account) external onlyGovernor {
         _revoke(role, account);
+        if (role == MINTER_ROLE && account == minter) {
+            emit MinterUpdated(minter, address(0));
+            minter = address(0);
+        }
     }
 
     function hasRole(bytes32 role, address account) external view returns (bool) {

@@ -53,7 +53,7 @@ export function signerFor(chain: ChainName, role: number): ManagedSigner {
   const cached = signers.get(key);
   if (cached) return cached;
 
-  let base: Wallet;
+  let base: Wallet | HDNodeWallet;
   if (config.chainMode === "live") {
     if (!config.liveSignerKey) {
       throw new Error("LIVE_SIGNER_PRIVATE_KEY is required for live mode custody");

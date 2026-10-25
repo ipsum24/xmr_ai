@@ -50,6 +50,7 @@ chainsRouter.get(
           usdt: deployment.usdt,
           usdtDecimals: deployment.usdtDecimals,
           wusdt: deployment.wusdt,
+          wusdtDecimals: deployment.wusdtDecimals,
           dexRouter: deployment.dexRouter,
           dexName: deployment.dexName,
           explorerBase: deployment.explorerBase,

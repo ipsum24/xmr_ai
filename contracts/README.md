@@ -14,7 +14,9 @@ Solidity sources for the wUSDT fleet.
 Minting is a two-role affair, and neither role is an EOA:
 
 - `WrappedUSDT` grants `MINTER_ROLE` to the **TreasuryVault** only
-  (`setMinter(vault)`), so supply can never appear from a signature alone;
+  (`setMinter(vault)`), so supply can never appear from a signature alone.
+  Both `setMinter` and `grantRole(MINTER_ROLE, …)` require a deployed contract
+  and replace the previous minter instead of accumulating mint authorities;
 - the vault mints in exactly one place — `injectNetReserve(messageId, amount)` —
   which is `BRIDGE_ROLE` (the custody signer), refuses a replayed `messageId`,
   and refuses to push `currentReserve` past `maxReserve` (the $10M target by
@@ -31,6 +33,10 @@ Outflows, each on its own path:
 | `releaseReserve(to, amount)` | `OPERATOR_ROLE` | the platform's own payout (console transfer-out, swap, liquidation) |
 | `confirmRedemption(requestId, user, amount)` | `OPERATOR_ROLE` | records the source-chain release for a holder's `requestRedemption`, once per id |
 | `pause()` / `unpause()` | `PAUSER_ROLE` | emergency stop over mint, distribution, releases and transfers |
+
+Distribution rejects the vault itself as a recipient so a self-transfer cannot
+reduce the ledger without moving tokens. Handing governance to the current
+governor is a no-op, not an accidental removal of that governor's roles.
 
 `WrappedUSDT.requestRedemption(amount)` is permissionless: the holder burns and a
 replay-safe `requestId` (sender, amount, nonce, chain id) is emitted for the

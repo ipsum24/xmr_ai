@@ -59,6 +59,7 @@ export interface ChainInfo {
   usdt: string;
   usdtDecimals: number;
   wusdt: string;
+  wusdtDecimals: number;
   dexRouter: string;
   dexName: string;
   explorerBase: string | null;

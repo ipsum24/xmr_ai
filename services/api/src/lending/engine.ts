@@ -191,7 +191,7 @@ export async function repayLoan(input: { adminId: string | null; loanId: string;
 
   // Early repayment keeps full-term interest — the treasury's income stays
   // predictable and short-term borrowers self-select.
-  const repayment = await transferToken(loan.chain, "usdt", payer.id, treasury.address, loan.totalRepayRaw, {
+  const repayment = await transferToken(loan.chain as ChainName, "usdt", payer.id, treasury.address, loan.totalRepayRaw, {
     adminId: input.adminId,
     direction: "lending",
     note: `loan ${loan.id} repayment (full-term interest)`,

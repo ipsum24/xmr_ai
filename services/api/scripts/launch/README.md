@@ -1,5 +1,115 @@
 # Launch tooling — devnet → mainnet
 
+## State-aware deployment (`npm run deploy`)
+
+The autonomous launcher is an additional, KMS-only deployment path; the numbered
+legacy gates below are retained. Run from the workspace root, inside the API
+container:
+
+```bash
+npm run deploy:check                  # read-only preflight, never broadcasts
+npm run deploy -- --chains=ethereum,bsc  # real deployments; no interactive prompts
+```
+
+It resolves secrets, validates **every selected chain before any broadcasts**,
+then fans out independent chain pipelines with `Promise.allSettled`. Each pipeline
+uses its own sequential nonce stream. Live fees fund a full deployment budget;
+a stale head, wrong chain, missing official USDT, bad decimals, insufficient gas,
+fee doubling, or an absolute fee ceiling breach fails closed. Each transaction
+uses a gas estimate with a 20% margin. Transport errors have three bounded
+attempts with exponential backoff; reverts and policy failures are not retried.
+
+### Credentials and policy
+
+- `CHAIN_MODE=live`, `NODE_ENV=production`; mock/demo switches are forbidden.
+- `LIVE_SIGNER_KEY_ID`: an AWS KMS **ECC_SECG_P256K1**, `SIGN_VERIFY` key.
+  `AWS_REGION` and the AWS SDK credential chain (prefer an IAM role) must permit
+  `kms:GetPublicKey` and `kms:Sign`. The key never leaves KMS. Raw
+  `LIVE_SIGNER_PRIVATE_KEY` in this launcher's environment is **refused**.
+- `LAUNCH_OPERATOR`: the nonzero custody/operator **address**, not its key.
+  `LAUNCH_BRIDGE` optionally separates the bridge address; otherwise operator is
+  also the bridge. Governance is `LAUNCH_GOVERNOR` or the KMS deployer. A separate
+  governor must already be a deployed contract/multisig on every selected chain.
+- `ETH_RPC`, `BSC_RPC`, `ARB_RPC`, `POLY_RPC`: HTTPS mainnet URLs; optional `_2`
+  endpoints are probed in order when the primary fails preflight. Never put a
+  provider key in a URL fragment. No arbitrary public fallback is silently used.
+- `SECRETS_PROVIDER=env` (default) or `aws`. Environment values always win.
+  AWS fallback looks up a plain-string secret named `${AWS_SECRET_PREFIX}<NAME>`
+  in Secrets Manager, caches only in memory, and treats access/transport errors
+  as failures, not as missing secrets. Its IAM role needs `secretsmanager:GetSecretValue`.
+- `DEPLOY_GAS_BUDGET` (default 15000000 gas), `DEPLOY_MAX_FEE_GWEI` (optional
+  absolute ceiling), `DEPLOY_CONFIRM_TIMEOUT_MS` (default 300000). Confirmations
+  come from the shared chain registry, never a one-block production override.
+- Optional `ETHERSCAN_V2_KEY`, overridden by `ETHERSCAN_V2_KEY_<CHAIN>`, enables
+  Etherscan V2 source publication. Missing/rejected/unavailable explorer service
+  records `manual-queued`; this does **not** waive the mandatory on-chain checks.
+- Optional `DEPLOY_OPS_WEBHOOK_URL` receives a sanitized terminal-failure summary.
+  Delivery failure is reported; it never erases the deployment receipt.
+
+Real values belong in encrypted secrets/IAM configuration, not Git or chat.
+This launcher does not provision cloud accounts, acquire private keys, create
+liquidity, fund accounts, or export a KMS key. The existing API and numbered gates
+still use their existing custody-signing configuration; replacing all runtime
+signers with KMS is a separate integration, not silently enabled by this CLI.
+
+### Durable state and verification
+
+`DEPLOY_RECEIPT_DIR` defaults to `reports/deploy/` (Git-ignored). Persist and back
+up this directory. `journal.json` checkpoints **signed bytes before broadcast**,
+then the confirmed step. After an ambiguous failure, retries/restarts re-read the
+receipt and re-broadcast only those identical bytes/hash; they never issue a new
+deployment with a new nonce. The journal contains public addresses, transaction
+intents and signatures, never private keys, RPC URLs or resolved secret values.
+Use one journal per fleet. A fingerprint binds source bytecode, signer, chain set,
+roles and CREATE2 configuration. Corrupt or mismatching journals fail closed;
+never delete a journal to retry an uncertain broadcast. Concurrent launchers
+are refused by `deploy.lock` within that journal directory. Use a dedicated KMS
+deployer; never use the same signer concurrently from another process or another
+journal directory. After an unclean process kill, first verify no old launcher
+is running before manually removing that lock file.
+
+After all chains settle, `deployment_receipt.json` is atomically committed with
+`complete` or `partial`, separate explorer outcomes, actual broadcast hashes and
+an actual SHA-256 digest of the receipt body excluding `sha256`. Any chain failure
+sets a nonzero exit code; successful-chain checkpoints remain resumable.
+
+Before a chain is marked verified, reads assert token identity/decimals, bytecode,
+vault binding and exclusive minter wiring, governance admin/pauser handover,
+bridge/operator permissions, removed deployer permissions, zero initial supply
+and reserve, the $10M ceiling, pause state, reconciliation and reserve backing.
+Existing `WUSDT_<CHAIN>` / `TREASURY_VAULT_<CHAIN>` pairs are reverified, never
+silently replaced. The printed addresses are outputs to save securely for the
+API; the launcher does not rewrite source files or the managed secret store.
+
+Optional deterministic deployment uses `FLEET_SALT` (bytes32),
+`CREATE2_FACTORY_<CHAIN>`, and `CREATE2_FACTORY_CODE_HASH`. The supplied factory
+must implement the audited **salt || init-code** singleton deployment protocol
+and its on-chain runtime must match the pinned hash. No factory is assumed or
+deployed automatically. CREATE2 addresses depend on constructor arguments;
+**BSC's 18 decimals mean its addresses need not equal the 6-decimal chains**.
+Using a salt alone cannot truthfully promise identical cross-chain addresses.
+
+This path only deploys/verifies wUSDT and TreasuryVault. It does not raise caps,
+seed DEX pools, perform smoke swaps, deploy lending/staking contracts, implement
+LayerZero/CCIP proof verification, or broadcast on TRON. On-chain role tests do
+not replace an independent contract audit or prove source-chain USDT was locked.
+The existing admin login/logout and console authorization are preserved.
+
+### Targeted checks
+
+```bash
+npm run test:deployment -w services/api
+# A separately started, disposable Anvil (chain ID 31337) is mandatory:
+CONTRACT_TEST_RPC=http://anvil-ethereum:8555 npm run test:contracts -w services/api
+```
+
+The contract test refuses the platform/mainnet chain IDs. It exercises fresh
+contracts with test-only signers on both 6- and 18-decimal paths; destroy that
+disposable node after the test. KMS signing tests use a fake SDK transport and
+real signature recovery; they do not claim access to an actual AWS KMS key.
+
+---
+
 Ordered, fail-closed gates that take this platform from a local devnet stack to
 live mainnet chains: **Ethereum, BNB Chain, Arbitrum One, Polygon**. Each gate
 must pass before the next one is allowed to touch money. TRON is out of scope —
