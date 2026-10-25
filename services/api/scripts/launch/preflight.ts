@@ -12,7 +12,7 @@
  *   docker compose exec -T api npx tsx services/api/scripts/launch/preflight.ts
  *   … --chains=ethereum,bsc
  */
-import { env, GateReport, banner, custodyKey, human, label, registryChainId, rpcEnvName, rpcUrl, shortError, swapDexName, swapRouter, targetChains, usdtAddress, usdtDecimals, wusdtAddress } from "./lib/env";
+import { env, GateReport, banner, custodyKey, human, label, registryChainId, rpcEnvName, rpcUrl, shortError, swapDexName, swapRouter, targetChains, usdtAddress, usdtDecimals, vaultAddress, wusdtAddress } from "./lib/env";
 import { addressForKey, chainIdOf, codePresent, nativeBalance, provider, readToken } from "./lib/fleet";
 
 const BANNED_ENV_PREFIXES = ["MOCK_", "SIMULATE_", "FAKE_", "DEMO_MODE", "SEED_DEMO"];
@@ -119,6 +119,13 @@ for (const chain of chains) {
   const wusdt = wusdtAddress(chain);
   report.note(chain, "wUSDT address", wusdt ? `${wusdt} (Gate 2 will re-verify it)` : `WUSDT_${chain.toUpperCase()} not set — Gate 1 deploys it`);
 
+  const vault = vaultAddress(chain);
+  report.note(
+    chain,
+    "TreasuryVault address",
+    vault ? `${vault} (Gate 2 re-verifies the wiring)` : `TREASURY_VAULT_${chain.toUpperCase()} not set — Gate 1 deploys it`,
+  );
+
   const router = swapRouter(chain);
   report.note(chain, "DEX router", router ? `${router} (${swapDexName(chain)})` : `SWAP_ROUTER_${chain.toUpperCase()} not set — Gate 4 swaps would abort`);
 }
@@ -132,6 +139,7 @@ if (report.failures.length > 0) {
     console.log(`  ${rpcEnvName(chain)}=…${" ".repeat(Math.max(0, 24 - rpcEnvName(chain).length))}# ${label(chain)} mainnet RPC`);
   }
   console.log("  WUSDT_<CHAIN>=0x…                  # from Gate 1, once deployed");
+  console.log("  TREASURY_VAULT_<CHAIN>=0x…         # from Gate 1 — wUSDT's only minter");
   console.log("  SWAP_ROUTER_<CHAIN>=0x…            # the chain's real DEX router");
 }
 

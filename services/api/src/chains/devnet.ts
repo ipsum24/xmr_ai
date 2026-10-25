@@ -51,8 +51,20 @@ async function bootstrapDevnetChain(chain: ChainName) {
   const existing = await prisma.chainDeployment.findUnique({ where: { chain } });
   if (existing && existing.mode === "devnet") {
     const code = await provider.getCode(existing.wusdt);
-    if (code && code !== "0x") return existing; // fleet still deployed, nothing to do
+    if (code && code !== "0x") {
+      if (await hasReserveModel(chain, existing.wusdt)) {
+        // Same generation of contracts: complete the vault wiring in place.
+        const vault = await ensureVault(chain, existing.wusdt, decimals);
+        if (vault === existing.vault) return existing;
+        return prisma.chainDeployment.update({ where: { chain }, data: { vault } });
+      }
+      console.warn(`[chain] ${chain}: the deployed wUSDT predates the reserve model — deploying a fresh devnet fleet`);
+    }
   }
+
+  // A fresh fleet means the mint-cycle rows below describe a chain state that no
+  // longer exists, so the startup cycle has to run again against the new fleet.
+  await prisma.mintCycle.deleteMany({ where: { chain } });
 
   const bundle = compileContracts();
   const governor = signerFor(chain, ROLE.governance);
@@ -67,9 +79,9 @@ async function bootstrapDevnetChain(chain: ChainName) {
   ]);
   const dexRouter = await deployContract(bundle.LocalDexRouter, governor, [wusdt, usdt]);
 
-  // Mint engine custody: the treasury vault signer is the only minter.
-  const wusdtContract = new Contract(wusdt, bundle.WrappedUSDT.abi as any, governor as any) as any;
-  await (await wusdtContract.setMinter(treasury.address)).wait();
+  // Reserve model: the TreasuryVault is wUSDT's only minter and holds the shadow
+  // ledger; the custody signer holds the bridge/operator roles it signs with.
+  const vault = await ensureVault(chain, wusdt, decimals, bundle);
 
   // Devnet funding — the two balances that back everything else:
   //  · custody USDT held for the treasury vault (attested-lock stand-in)
@@ -88,6 +100,7 @@ async function bootstrapDevnetChain(chain: ChainName) {
       usdtDecimals: decimals,
       wusdt,
       wusdtDecimals: decimals,
+      vault,
       dexRouter,
       dexName: "local-dex (devnet stand-in)",
       governor: governor.address,
@@ -102,11 +115,88 @@ async function bootstrapDevnetChain(chain: ChainName) {
       usdtDecimals: decimals,
       wusdt,
       wusdtDecimals: decimals,
+      vault,
       dexRouter,
       dexName: "local-dex (devnet stand-in)",
       governor: governor.address,
     },
   });
+}
+
+/**
+ * Does the deployed token carry the reserve model (role-separated minting plus
+ * replay-safe redemption ids)? Only the enhanced contract answers this call, so a
+ * fleet deployed from an earlier revision is detected instead of half-used.
+ */
+async function hasReserveModel(chain: ChainName, wusdtAddress: string): Promise<boolean> {
+  const token = new Contract(
+    wusdtAddress,
+    ["function redemptionNonce() view returns (uint256)"] as unknown as string[],
+    providerFor(chain),
+  ) as any;
+  try {
+    await token.redemptionNonce();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Bring the TreasuryVault up on a chain and wire the reserve roles.
+ *
+ * The vault has to be the token's minter — that is what makes the shadow ledger
+ * the only source of supply — and the custody signer needs BRIDGE_ROLE to inject
+ * a cycle plus OPERATOR_ROLE to distribute and release. Idempotent: a vault that
+ * is already deployed and wired is left untouched.
+ */
+async function ensureVault(chain: ChainName, wusdtAddress: string, decimals: number, bundle = compileContracts()): Promise<string> {
+  const provider = providerFor(chain);
+  const governor = signerFor(chain, ROLE.governance);
+  const custody = signerFor(chain, ROLE.treasuryVault);
+  const wusdt = new Contract(wusdtAddress, bundle.WrappedUSDT.abi as any, governor as any) as any;
+
+  const row = await prisma.chainDeployment.findUnique({ where: { chain } });
+  let vault = row?.vault ?? "";
+  if (vault) {
+    const code = await provider.getCode(vault);
+    // A vault is bound to one token at construction: reusing it after the token
+    // was redeployed would leave the reserve minting the previous wUSDT.
+    const wired = code && code !== "0x"
+      ? ((await (new Contract(vault, bundle.TreasuryVault.abi as any, provider) as any).wUSDT()) as string)
+      : "";
+    if (wired.toLowerCase() !== wusdtAddress.toLowerCase()) vault = "";
+  }
+  if (!vault) {
+    vault = await deployContract(bundle.TreasuryVault, governor, [wusdtAddress, governor.address, decimals]);
+    console.log(`[chain] ${chain}: TreasuryVault deployed at ${vault}`);
+  }
+
+  const vaultContract = new Contract(vault, bundle.TreasuryVault.abi as any, governor as any) as any;
+  const minter: string = await wusdt.minter();
+  if (minter.toLowerCase() !== vault.toLowerCase()) {
+    await (await wusdt.setMinter(vault)).wait();
+    console.log(`[chain] ${chain}: wUSDT minter set to the TreasuryVault`);
+  }
+
+  const roleGrants: [string, string][] = [
+    [await vaultContract.BRIDGE_ROLE(), custody.address],
+    [await vaultContract.OPERATOR_ROLE(), custody.address],
+  ];
+  for (const [role, account] of roleGrants) {
+    if (!(await vaultContract.hasRole(role, account))) {
+      await (await vaultContract.grantRole(role, account)).wait();
+    }
+  }
+
+  // Sandbox ceiling: a local chain has no real money to protect, and the console's
+  // refill cycles need headroom above the $10M default a live launch starts with.
+  const devnetCeiling = 100_000_000n * 10n ** BigInt(decimals);
+  if ((await vaultContract.maxReserve()) < devnetCeiling) {
+    await (await vaultContract.setMaxReserve(devnetCeiling)).wait();
+  }
+
+  return vault;
 }
 
 async function bootstrapLiveChain(chain: ChainName) {
@@ -117,6 +207,11 @@ async function bootstrapLiveChain(chain: ChainName) {
 
   const treasury = signerFor(chain, ROLE.treasuryVault);
   const dexRouter = process.env[`SWAP_ROUTER_${chain.toUpperCase()}`] ?? "";
+  // Gate 1 prints this: the vault is wUSDT's only minter and holds the reserve.
+  const vault = process.env[`TREASURY_VAULT_${chain.toUpperCase()}`] ?? "";
+  if (!vault) {
+    console.warn(`[chain] ${chain}: TREASURY_VAULT_${chain.toUpperCase()} is not set — the reserve model needs it (run Gate 1)`);
+  }
 
   return prisma.chainDeployment.upsert({
     where: { chain },
@@ -128,6 +223,7 @@ async function bootstrapLiveChain(chain: ChainName) {
       usdtDecimals: registry.usdtDecimals,
       wusdt,
       wusdtDecimals: registry.usdtDecimals,
+      vault,
       dexRouter,
       dexName: process.env[`SWAP_DEX_${chain.toUpperCase()}`] ?? "dex",
       governor: treasury.address,
@@ -142,6 +238,7 @@ async function bootstrapLiveChain(chain: ChainName) {
       usdtDecimals: registry.usdtDecimals,
       wusdt,
       wusdtDecimals: registry.usdtDecimals,
+      vault,
       dexRouter,
       dexName: process.env[`SWAP_DEX_${chain.toUpperCase()}`] ?? "dex",
       governor: treasury.address,

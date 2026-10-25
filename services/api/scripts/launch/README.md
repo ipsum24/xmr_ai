@@ -30,25 +30,40 @@ Proves the machine is set up for a real mainnet launch:
 
 Fails closed and prints exactly which variables to supply.
 
-## 1 — deploy the fleet (`deploy-fleet.ts`, broadcasts)
+## 1 — deploy the reserve fleet (`deploy-fleet.ts`, broadcasts)
 
-Compiles `WrappedUSDT` from this checkout's own source and deploys it on each
-chain with the correct decimals for that chain, then calls `setMinter(<custody
-key address>)` so the mint engine can mint. When `LAUNCH_GOVERNOR` names a
-multisig, governance is handed over in a second transaction — the deploy key
-keeps no authority.
+Compiles `WrappedUSDT` **and** `TreasuryVault` from this checkout's own source and
+deploys the pair on each chain with the correct decimals for that chain, then
+wires the reserve model the enhanced design requires:
 
-Sequential, one chain at a time, each contract read back before the next deploy.
-Already-deployed addresses (`WUSDT_<CHAIN>` set, with code, matching decimals and
-minter) are skipped rather than redeployed. It prints the `WUSDT_<CHAIN>=0x…`
-lines to add to the live environment.
+1. deploy `wUSDT` (governor = the deploy key, this chain's USDT decimals);
+2. deploy `TreasuryVault(wUSDT, governor = the deploy key, same decimals)`;
+3. `setMinter(<vault>)` — the vault becomes the token's **only** minter, so no
+   key can create supply and every mint goes through the replay-protected
+   `injectNetReserve`;
+4. grant the vault's `BRIDGE_ROLE` and `OPERATOR_ROLE` to the custody signer, so
+   it can inject a cycle, distribute the 25 % batch and release a redemption;
+5. when `LAUNCH_GOVERNOR` names a multisig, hand governance of **both** contracts
+   over — the deploy key keeps no authority (pausing and admin stay with
+   governance).
+
+Sequential, one chain at a time, the wired fleet read back before the next
+deploy. A chain whose `WUSDT_<CHAIN>`/`TREASURY_VAULT_<CHAIN>` pair is already set
+is skipped only when it is complete and correctly wired (vault = minter, bound to
+the same token, right decimals, custody holds bridge + operator); anything else is
+reported instead of redeployed. It prints both `…=0x…` lines to add to the live
+environment.
 
 ## 2 — verify the fleet (`verify-fleet.ts`, reads only)
 
 Reads every assertion back from mainnet: USDT decimals, deployed wUSDT identity
-(`Wrapped USDT` / `wUSDT`) and decimals, minter = mint engine key, governor =
-launch governance, DEX router has code, custody holds gas, and the reserve
-invariant `wUSDT.totalSupply() ≤ custodied USDT`. Any mismatch stops the launch.
+(`Wrapped USDT` / `wUSDT`) and decimals, **minter = the TreasuryVault** (never an
+EOA), that vault bound to this token with the chain's decimals and the launch
+target as its ceiling, the custody signer holding the vault's `BRIDGE_ROLE` and
+`OPERATOR_ROLE`, the vault's shadow ledger reconciling (`reserveDrift() = 0`) and
+not paused, governor = launch governance on both contracts, DEX router has code,
+custody holds gas, and the reserve invariant `wUSDT.totalSupply() ≤ custodied
+USDT`. Any mismatch stops the launch.
 
 ## 3 — gas float (`gas-forward.ts`, broadcasts native value)
 
@@ -102,11 +117,13 @@ governor multisig has raised the caps.
 |---|---|---|
 | `CHAIN_MODE=live` | all | the platform's live chain mode |
 | `NODE_ENV=production` | all | activates the runtime guard (`assertRuntimeMode`) |
-| `LIVE_SIGNER_PRIVATE_KEY` | 1, 2, 3, 4 | custody key: pays the gas float, holds the minter role |
+| `LIVE_SIGNER_PRIVATE_KEY` | 1, 2, 3, 4 | custody key: deploys, pays the gas float, and holds the vault's `BRIDGE_ROLE` + `OPERATOR_ROLE` (it can never mint) |
 | `ETH_RPC` `BSC_RPC` `ARB_RPC` `POLY_RPC` | all | mainnet endpoints (same names live mode reads) |
 | `ETH_RPC_2` … (optional) | 4 | second endpoint for the independent receipt re-read |
-| `LAUNCH_GOVERNOR` (optional) | 1, 2 | multisig that receives governance |
+| `LAUNCH_GOVERNOR` (optional) | 1, 2 | multisig that receives governance of the token **and** the vault |
 | `WUSDT_<CHAIN>` | 1 (skip), 2, 4 | deployed wUSDT address — Gate 1 prints it |
+| `TREASURY_VAULT_<CHAIN>` | 1 (skip), 2, 4 | deployed TreasuryVault (wUSDT's only minter) — Gate 1 prints it; live mode reads it into the ledger |
+| `TREASURY_VAULT_TARGET_USD` (optional, default 10000000) | 2 | the reserve ceiling Gate 2 expects on a fresh vault |
 | `SWAP_ROUTER_<CHAIN>`, `SWAP_DEX_<CHAIN>` | 2, 4 | the chain's real DEX router and its name |
 | `APP_WALLET_ADDRESSES` | 3, 4 | comma-separated app wallet addresses |
 | `GAS_FORWARD_TO`, `GAS_FORWARD_TO_<CHAIN>` (optional) | 3 | gas-float recipients, chain override first; defaults to `APP_WALLET_ADDRESSES` |
@@ -115,7 +132,29 @@ governor multisig has raised the caps.
 | `DATABASE_URL` | 4 | platform ledger |
 
 Real values belong in the platform's encrypted secret store (delivered to
-`/run/base44/app.env`) — never in the repo.
+`/run/base44/app.env`) — never in the repo. `LIVE_SIGNER_PRIVATE_KEY` is the only
+value here that is a secret in the credential sense; it is also the one that must
+never be shared, since whoever holds it can move the reserve.
+
+`WUSDT_<CHAIN>` and `TREASURY_VAULT_<CHAIN>` are **outputs** of Gate 1: run the
+gate, then store the two lines it prints and re-run Gate 2. Live mode refuses to
+register a chain without `WUSDT_<CHAIN>` and warns loudly when the vault address
+is missing, because without it the reserve model has no contract to mint through.
+
+### Where the values come from
+
+| Value | Provider / where to get it |
+|---|---|
+| `ETH_RPC`, `ARB_RPC`, `POLY_RPC` | Alchemy dashboard → Create app → HTTPS URL (`https://eth-mainnet.g.alchemy.com/v2/<key>`, `…arb-mainnet…`, `…polygon-mainnet…`), or Infura (`https://mainnet.infura.io/v3/<key>`) |
+| `BSC_RPC` | QuickNode → Create BSC endpoint (`https://<endpoint>.bsc.quiknode.pro/<token>/`), or any BSC archive node you control |
+| `*_RPC_2` | a **different** provider for the same chain — an independent endpoint is the point of the Gate 4 receipt re-read |
+| `LIVE_SIGNER_PRIVATE_KEY` | the custody account's key from your signer/KMS export; it must be funded with native gas on all four chains |
+| `SWAP_ROUTER_<CHAIN>` | the chain's own DEX: Uniswap V3 `SwapRouter02` on Ethereum/Arbitrum/Polygon, PancakeSwap V3 on BSC |
+| `GATE4_EXTERNAL_ADDRESS` | an ops-owned address you control the key for (it receives the smoke cycle's test funds) |
+
+Endpoint URLs carry the provider key, so they are credentials: store them in the
+secret store, never in compose, the repo or a gate report. TRON's TronGrid key is
+header-based and TRON is out of scope in this slice.
 
 ## Guarantees this tooling keeps
 
@@ -135,6 +174,7 @@ Real values belong in the platform's encrypted secret store (delivered to
 - **Kubernetes rollout** — this repo has no cluster manifests; the API and console
   deploy however the operator runs the stack (docker compose).
 - **Vault/staking/lending contracts** from the build spec — not in this slice; the
-  only production contract here is `WrappedUSDT` (`contracts/README.md`).
+  production contracts here are `WrappedUSDT` **and** `TreasuryVault`
+  (`contracts/README.md`), both deployed by Gate 1.
 - **DEX pool seeding** — needs real USDT capital; the swap step in Gate 4 needs an
   existing pool with liquidity for the configured router.

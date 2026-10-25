@@ -10,6 +10,58 @@ export const ERC20_ABI = [
   "function transfer(address to, uint256 amount) returns (bool)",
   "function mint(address to, uint256 amount)",
   "function burn(uint256 amount)",
+  // wUSDT-only reads: who mints it (the TreasuryVault) and who governs it.
+  "function minter() view returns (address)",
+  "function governor() view returns (address)",
+  "function paused() view returns (bool)",
+  "function pause()",
+  "function unpause()",
+  // Redemption: burn + a replay-safe request id the vault's operator confirms.
+  "function requestRedemption(uint256 amount) returns (bytes32)",
+  "function redemptionNonce() view returns (uint256)",
+] as const;
+
+/**
+ * TreasuryVault — the shadow reserve: replay-protected injections, the 25 %
+ * distribution cycle, reserve releases and redemption confirmation.
+ */
+export const TREASURY_VAULT_ABI = [
+  "function wUSDT() view returns (address)",
+  "function decimals() view returns (uint8)",
+  "function governor() view returns (address)",
+  "function currentReserve() view returns (uint256)",
+  "function redemptionReleased() view returns (uint256)",
+  "function maxReserve() view returns (uint256)",
+  "function paused() view returns (bool)",
+  "function ADMIN_ROLE() view returns (bytes32)",
+  "function BRIDGE_ROLE() view returns (bytes32)",
+  "function OPERATOR_ROLE() view returns (bytes32)",
+  "function PAUSER_ROLE() view returns (bytes32)",
+  "function hasRole(bytes32 role, address account) view returns (bool)",
+  "function processedMessages(bytes32 messageId) view returns (bool)",
+  "function releasedRedemptions(bytes32 requestId) view returns (bool)",
+  "function getCurrentReserve() view returns (uint256)",
+  "function getUtilizationBps() view returns (uint256)",
+  "function expectedVaultBalance() view returns (uint256)",
+  "function reserveDrift() view returns (int256)",
+  "function injectNetReserve(bytes32 messageId, uint256 amount)",
+  "function distributeToAppWallets(address[] wallets)",
+  "function releaseReserve(address to, uint256 amount)",
+  "function confirmRedemption(bytes32 requestId, address user, uint256 amount)",
+  "function grantRole(bytes32 role, address account)",
+  "function revokeRole(bytes32 role, address account)",
+  "function setMaxReserve(uint256 newMaxReserve)",
+  "function setGovernor(address newGovernor)",
+  "function pause()",
+  "function unpause()",
+  // Declared so a revert decodes into a named error instead of "unknown custom error".
+  "error AlreadyProcessed(bytes32 id)",
+  "error CapacityExceeded(uint256 requested, uint256 available)",
+  "error InsufficientReserve(uint256 requested, uint256 available)",
+  "error EmptyBatch()",
+  "error BatchTooLarge(uint256 size)",
+  "error ZeroAmount()",
+  "error ZeroAddress()",
 ] as const;
 
 /** LocalDexRouter — the devnet liquidity router in this repo. */

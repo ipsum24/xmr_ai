@@ -67,6 +67,16 @@ export function wusdtAddress(chain: ChainName): string {
   return env(`WUSDT_${chain.toUpperCase()}`);
 }
 
+/** The TreasuryVault that holds wUSDT's minter role — Gate 1 prints it. */
+export function vaultAddress(chain: ChainName): string {
+  return env(`TREASURY_VAULT_${chain.toUpperCase()}`);
+}
+
+/** The reserve ceiling a fresh vault is launched with ($10M by default). */
+export function reserveTargetUsd(): number {
+  return Number(env("TREASURY_VAULT_TARGET_USD") || "10000000");
+}
+
 export function swapRouter(chain: ChainName): string {
   return env(`SWAP_ROUTER_${chain.toUpperCase()}`);
 }

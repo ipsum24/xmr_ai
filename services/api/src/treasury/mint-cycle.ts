@@ -1,8 +1,10 @@
-import { mintWusdt, transferToken } from "../chains/broadcaster";
+import { keccak256, toUtf8Bytes } from "ethers";
+import { distributeReserve, injectReserve } from "../chains/broadcaster";
 import { config } from "../config";
 import { prisma } from "../db";
 import { bpsOfRaw, fromRaw, toRaw, type ChainName } from "../shared";
 import { mintCapacityRaw } from "./reserve";
+import { vaultStateFor } from "./vault";
 
 /**
  * The startup autonomous mint cycle.
@@ -30,6 +32,14 @@ export async function runStartupMintCycles(): Promise<void> {
       console.error(`[mint] ${chain}: cycle failed — ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+}
+
+/**
+ * The bridge message id for a cycle. A chain + cycle can only ever be injected
+ * once, so a replayed cycle message reverts on chain instead of minting twice.
+ */
+export function mintCycleMessageId(chain: ChainName, cycleIndex: number): string {
+  return keccak256(toUtf8Bytes(`wusdt:cycle:${chain}:${cycleIndex}`));
 }
 
 export interface MintCycleResult {
@@ -87,27 +97,30 @@ export async function runMintCycle(chain: ChainName, targetUsd: number = config.
       return { chain, cycleIndex, attestedRaw: custodyRaw.toString(), mintedRaw: "0", distributedRaw: "0", mintTxId: null };
     }
 
-    // ── Mint into the treasury vault (real broadcast, real hash) ────────────
-    const mint = await mintWusdt(chain, treasury.address, mintable, {
+    // ── Mint into the TreasuryVault's shadow reserve (real hash) ────────────
+    const mint = await injectReserve(chain, mintCycleMessageId(chain, cycleIndex), mintable, {
       note: `treasury vault mint cycle #${cycleIndex}`,
     });
 
-    // ── 25 % out to the app wallets, as its own real transfers ─────────────
-    const distributionRaw = bpsOfRaw(mintable, config.appWalletDistributionBps);
+    // ── 25 % out to the app wallets: one bounded batch on the vault ─────────
     const appWallets = await prisma.wallet.findMany({
       where: { chain, kind: "app" },
       orderBy: { derivationIndex: "asc" },
     });
 
     let distributed = 0n;
-    if (appWallets.length > 0 && BigInt(distributionRaw) > 0n) {
-      const perWallet = BigInt(distributionRaw) / BigInt(appWallets.length);
-      for (const wallet of appWallets) {
-        if (perWallet <= 0n) break;
-        await transferToken(chain, "wusdt", treasury.id, wallet.address, perWallet.toString(), {
-          note: `cycle #${cycleIndex} app-wallet distribution`,
-        });
-        distributed += perWallet;
+    if (appWallets.length > 0) {
+      // Read the reserve the vault now holds: the vault distributes 25 % of it,
+      // so the ledger row records what actually moved (dust stays in the reserve).
+      const reserveRaw = BigInt((await vaultStateFor(chain, deployment)).reserveRaw);
+      const perWallet = BigInt(bpsOfRaw(reserveRaw.toString(), config.appWalletDistributionBps)) / BigInt(appWallets.length);
+      if (perWallet > 0n) {
+        await distributeReserve(
+          chain,
+          appWallets.map((wallet) => wallet.address),
+          { note: `cycle #${cycleIndex} app-wallet distribution` },
+        );
+        distributed = perWallet * BigInt(appWallets.length);
       }
     }
 

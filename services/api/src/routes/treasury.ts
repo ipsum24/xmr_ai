@@ -1,15 +1,24 @@
+import { randomUUID } from "node:crypto";
 import { Router } from "express";
+import { keccak256, toUtf8Bytes } from "ethers";
 import { z } from "zod";
-import { burnWusdt, mintWusdt } from "../chains/broadcaster";
+import { injectReserve, redeemWusdt, releaseReserve } from "../chains/broadcaster";
+import { config } from "../config";
 import { prisma } from "../db";
 import { asyncHandler, requireAuth, type AuthedRequest } from "../http/context";
 import { listMintCycles, runMintCycle } from "../treasury/mint-cycle";
 import { mintCapacityRaw } from "../treasury/reserve";
+import { vaultStates } from "../treasury/vault";
 import { fromRaw, isChainName, toRaw, type ChainName } from "../shared";
 
 export const treasuryRouter = Router();
 
 const chainSchema = z.string().refine(isChainName, "unknown chain");
+
+/** One-off bridge message id for an admin mint — never reused, never replayable. */
+function mintMessageId(chain: ChainName): string {
+  return keccak256(toUtf8Bytes(`wusdt:admin-mint:${chain}:${randomUUID()}`));
+}
 
 treasuryRouter.get(
   "/cycles",
@@ -17,6 +26,19 @@ treasuryRouter.get(
   asyncHandler(async (_req, res) => {
     const cycles = await listMintCycles();
     res.json(cycles);
+  }),
+);
+
+/**
+ * The on-chain reserve: what each chain's TreasuryVault holds, how close it is to
+ * its ceiling, whether it is paused, and whether the shadow ledger still
+ * reconciles with the tokens the vault actually has.
+ */
+treasuryRouter.get(
+  "/vault",
+  requireAuth,
+  asyncHandler(async (_req, res) => {
+    res.json(await vaultStates(config.chainTargets));
   }),
 );
 
@@ -74,14 +96,24 @@ treasuryRouter.post(
       );
     }
 
-    const result = await mintWusdt(chain, destination.address, amountRaw, {
+    // Supply is only ever created inside the vault, against a one-off message id.
+    // Naming a destination wallet funds it with an explicit release out of the
+    // reserve; otherwise the minted amount stays in the reserve.
+    const result = await injectReserve(chain, mintMessageId(chain), amountRaw, {
       adminId: req.admin?.id ?? null,
-      note: "admin mint",
+      note: body.toWalletId ? `admin mint → ${destination.label}` : "admin mint (reserve)",
     });
+    const release = body.toWalletId
+      ? await releaseReserve(chain, destination.address, amountRaw, {
+          adminId: req.admin?.id ?? null,
+          note: `admin mint → ${destination.label}`,
+        })
+      : null;
+
     await prisma.auditLog.create({
       data: { adminId: req.admin?.id, action: "treasury.mint", detail: `${chain}:${result.amountHuman}` },
     });
-    res.json(result);
+    res.json({ ...result, releaseTxHash: release?.hash ?? null });
   }),
 );
 
@@ -96,9 +128,11 @@ treasuryRouter.post(
     const deployment = await prisma.chainDeployment.findUnique({ where: { chain } });
     if (!deployment) throw new Error(`chain ${chain} is not configured`);
 
-    const result = await burnWusdt(chain, body.walletId, toRaw(body.amountHuman, deployment.wusdtDecimals), {
+    // Redemption: the wallet burns and emits a request id, the vault's operator
+    // confirms it so the reserve drops with the release.
+    const result = await redeemWusdt(chain, body.walletId, toRaw(body.amountHuman, deployment.wusdtDecimals), {
       adminId: req.admin?.id ?? null,
-      note: "admin burn",
+      note: "admin redemption",
     });
     await prisma.auditLog.create({
       data: { adminId: req.admin?.id, action: "treasury.burn", detail: `${body.chain}:${body.amountHuman}` },

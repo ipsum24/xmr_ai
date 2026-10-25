@@ -49,6 +49,8 @@ model ChainDeployment {
   usdtDecimals Int
   wusdt        String
   wusdtDecimals Int
+  // TreasuryVault — holds the shadow reserve and is wUSDT's only minter.
+  vault        String    @default("")
   dexRouter    String
   dexName      String
   governor     String

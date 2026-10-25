@@ -2,7 +2,7 @@ import { Contract, type TransactionResponse } from "ethers";
 import { prisma } from "../db";
 import { CHAIN_REGISTRY, explorerUrlFor, fromRaw, type ChainName } from "../shared";
 import { attachHash, createTransaction, markFailedById } from "../transactions/service";
-import { ERC20_ABI, LOCAL_DEX_ABI, UNISWAP_V3_ROUTER_ABI } from "./abi";
+import { ERC20_ABI, LOCAL_DEX_ABI, TREASURY_VAULT_ABI, UNISWAP_V3_ROUTER_ABI } from "./abi";
 import { signerFor, ROLE } from "./rpc";
 import { signerForWallet } from "./wallets";
 
@@ -97,8 +97,78 @@ async function walletRow(walletId: string) {
   return wallet;
 }
 
-/** Mint new wUSDT. Only the treasury vault signer holds the minter role. */
-export async function mintWusdt(
+/** The TreasuryVault contract, signed by the custody signer. */
+async function vaultFor(chain: ChainName, deployment: { vault: string }, signer: unknown) {
+  if (!deployment.vault) {
+    throw new Error(
+      `chain ${chain} has no TreasuryVault configured — set TREASURY_VAULT_${chain.toUpperCase()} (live) or redeploy the devnet fleet`,
+    );
+  }
+  return new Contract(deployment.vault, TREASURY_VAULT_ABI as unknown as string[], signer as any) as any;
+}
+
+/**
+ * Mint into the shadow reserve: the vault credits `messageId` once and mints the
+ * matching wUSDT. This is the platform's ONLY supply-creating call — the vault
+ * holds wUSDT's minter role and mints nowhere else.
+ */
+export async function injectReserve(
+  chain: ChainName,
+  messageId: string,
+  amountRaw: string,
+  options: { adminId?: string | null; note?: string } = {},
+): Promise<BroadcastResult> {
+  const deployment = await deploymentFor(chain);
+  const signer = signerFor(chain, ROLE.treasuryVault);
+  const vault = await vaultFor(chain, deployment, signer);
+  return broadcast({
+    chain,
+    direction: "vault_inject",
+    fromAddress: signer.address,
+    toAddress: deployment.vault,
+    amountRaw,
+    tokenId: deployment.wusdt,
+    tokenSymbol: "wUSDT",
+    decimals: deployment.wusdtDecimals,
+    adminId: options.adminId,
+    note: options.note ?? "TreasuryVault reserve injection",
+    send: () => vault.injectNetReserve(messageId, amountRaw),
+  });
+}
+
+/**
+ * The 25 % cycle: one bounded batch out of the reserve to the app wallets, with
+ * any un-splittable dust re-absorbed into the ledger rather than dropped.
+ */
+export async function distributeReserve(
+  chain: ChainName,
+  recipients: string[],
+  options: { adminId?: string | null; note?: string } = {},
+): Promise<BroadcastResult> {
+  const deployment = await deploymentFor(chain);
+  const signer = signerFor(chain, ROLE.treasuryVault);
+  const vault = await vaultFor(chain, deployment, signer);
+  return broadcast({
+    chain,
+    direction: "vault_distribute",
+    fromAddress: signer.address,
+    toAddress: deployment.vault,
+    amountRaw: "0",
+    tokenId: deployment.wusdt,
+    tokenSymbol: "wUSDT",
+    decimals: deployment.wusdtDecimals,
+    adminId: options.adminId,
+    note: options.note ?? `distribution batch of ${recipients.length} wallet(s)`,
+    send: () => vault.distributeToAppWallets(recipients),
+  });
+}
+
+/**
+ * Pay wUSDT out of the reserve to `to`. The platform's own payout path
+ * (console transfer-out, swap funding, liquidation) uses this; a holder
+ * redemption releases on the source chain via `confirmRedemption` instead.
+ */
+export async function releaseReserve(
   chain: ChainName,
   toAddress: string,
   amountRaw: string,
@@ -106,10 +176,10 @@ export async function mintWusdt(
 ): Promise<BroadcastResult> {
   const deployment = await deploymentFor(chain);
   const signer = signerFor(chain, ROLE.treasuryVault);
-  const contract = new Contract(deployment.wusdt, ERC20_ABI as unknown as string[], signer as any) as any;
+  const vault = await vaultFor(chain, deployment, signer);
   return broadcast({
     chain,
-    direction: "mint",
+    direction: "vault_release",
     fromAddress: signer.address,
     toAddress,
     amountRaw,
@@ -117,23 +187,58 @@ export async function mintWusdt(
     tokenSymbol: "wUSDT",
     decimals: deployment.wusdtDecimals,
     adminId: options.adminId,
-    note: options.note ?? "platform mint engine",
-    send: () => contract.mint(toAddress, amountRaw),
+    note: options.note ?? "release from the reserve",
+    send: () => vault.releaseReserve(toAddress, amountRaw),
   });
 }
 
-/** Burn wUSDT held by a platform wallet (redemption path). */
-export async function burnWusdt(
+/** Confirm a holder's redemption request: the reserve drops with the release. */
+export async function confirmRedemption(
   chain: ChainName,
-  walletId: string,
+  requestId: string,
+  user: string,
   amountRaw: string,
   options: { adminId?: string | null; note?: string } = {},
 ): Promise<BroadcastResult> {
   const deployment = await deploymentFor(chain);
+  const signer = signerFor(chain, ROLE.treasuryVault);
+  const vault = await vaultFor(chain, deployment, signer);
+  return broadcast({
+    chain,
+    direction: "redemption_confirm",
+    fromAddress: signer.address,
+    toAddress: deployment.vault,
+    amountRaw,
+    tokenId: deployment.wusdt,
+    tokenSymbol: "wUSDT",
+    decimals: deployment.wusdtDecimals,
+    adminId: options.adminId,
+    note: options.note ?? `redemption ${requestId}`,
+    send: () => vault.confirmRedemption(requestId, user, amountRaw),
+  });
+}
+
+/**
+ * Burn wUSDT held by a platform wallet and close the burn → release loop: the
+ * wallet's `requestRedemption` burns and emits a replay-safe request id, and the
+ * operator confirms that id on the vault so the reserve drops with it.
+ */
+export async function redeemWusdt(
+  chain: ChainName,
+  walletId: string,
+  amountRaw: string,
+  options: { adminId?: string | null; note?: string } = {},
+): Promise<BroadcastResult & { requestId: string; confirmTxHash: string | null }> {
+  const deployment = await deploymentFor(chain);
   const wallet = await walletRow(walletId);
   const signer = signerForWallet(chain, wallet);
   const contract = new Contract(deployment.wusdt, ERC20_ABI as unknown as string[], signer as any) as any;
-  return broadcast({
+
+  // The id the transaction will emit is derived from state, so a static call
+  // reads exactly the id the burn is about to use.
+  const requestId = (await contract.requestRedemption.staticCall(amountRaw)) as string;
+
+  const burn = await broadcast({
     chain,
     direction: "burn",
     fromAddress: wallet.address,
@@ -143,9 +248,16 @@ export async function burnWusdt(
     tokenSymbol: "wUSDT",
     decimals: deployment.wusdtDecimals,
     adminId: options.adminId,
-    note: options.note ?? "platform burn engine",
-    send: () => contract.burn(amountRaw),
+    note: options.note ?? "platform redemption engine",
+    send: () => contract.requestRedemption(amountRaw),
   });
+
+  const confirm = await confirmRedemption(chain, requestId, wallet.address, amountRaw, {
+    adminId: options.adminId,
+    note: `redemption release for ${wallet.label}`,
+  });
+
+  return { ...burn, requestId, confirmTxHash: confirm.hash };
 }
 
 /** Move wUSDT or real USDT out of a platform wallet. */

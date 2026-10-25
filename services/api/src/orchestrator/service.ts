@@ -1,6 +1,7 @@
 import { fromRaw, toRaw, type ChainName } from "../shared";
 import { prisma } from "../db";
-import { swapWusdtForUsdt, transferToken, type BroadcastResult } from "../chains/broadcaster";
+import { releaseReserve, swapWusdtForUsdt, transferToken, type BroadcastResult } from "../chains/broadcaster";
+import { vaultStateFor } from "../treasury/vault";
 import { awaitReceipt } from "../chains/handshake";
 import { onChainBalance } from "../chains/wallets";
 
@@ -44,6 +45,21 @@ export async function unlockTransfer(input: UnlockTransferInput): Promise<Broadc
 
   const amountRaw = toRaw(input.amountHuman, deployment.wusdtDecimals);
 
+  // The un-distributed reserve lives in the TreasuryVault, so a payout sourced
+  // from the treasury wallet is a vault release rather than a wallet transfer.
+  if (deployment.vault && wallet.kind === "treasury") {
+    const vault = await vaultStateFor(input.chain, deployment);
+    if (BigInt(vault.reserveRaw) < BigInt(amountRaw)) {
+      throw new Error(
+        `insufficient reserve: the TreasuryVault holds ${vault.reserveHuman} wUSDT, requested ${input.amountHuman}`,
+      );
+    }
+    return releaseReserve(input.chain, input.toExternal, amountRaw, {
+      adminId: input.adminId,
+      note: "orchestrator: release reserve & transfer",
+    });
+  }
+
   const held = await onChainBalance(input.chain, deployment.wusdt, wallet.address);
   if (held < BigInt(amountRaw)) {
     throw new Error(
@@ -54,6 +70,31 @@ export async function unlockTransfer(input: UnlockTransferInput): Promise<Broadc
   return transferToken(input.chain, "wusdt", input.walletId, input.toExternal, amountRaw, {
     adminId: input.adminId,
     note: "orchestrator: unlock & transfer",
+  });
+}
+
+/**
+ * Swaps and liquidations are signed by a wallet, so reserve-sourced wUSDT has to
+ * be released from the vault into that wallet first. A release of the same
+ * amount the wallet is short also covers a partial top-up, and an app wallet
+ * (which already holds its own 25 % share) needs nothing.
+ */
+async function fundFromReserve(
+  deployment: { vault: string; wusdt: string; wusdtDecimals: number },
+  chain: ChainName,
+  wallet: { kind: string; address: string },
+  amountRaw: string,
+  adminId: string | null,
+): Promise<BroadcastResult | null> {
+  if (!deployment.vault || wallet.kind !== "treasury") return null;
+
+  const held = await onChainBalance(chain, deployment.wusdt, wallet.address);
+  const missing = BigInt(amountRaw) - held;
+  if (missing <= 0n) return null;
+
+  return releaseReserve(chain, wallet.address, missing.toString(), {
+    adminId,
+    note: `orchestrator: release ${fromRaw(missing, deployment.wusdtDecimals)} from the reserve`,
   });
 }
 
@@ -72,6 +113,8 @@ export async function swapToUsdt(input: SwapInput) {
 
   const amountInRaw = toRaw(input.amountHuman, deployment.wusdtDecimals);
   const minOutRaw = toRaw(input.minOutHuman, deployment.usdtDecimals);
+
+  await fundFromReserve(deployment, input.chain, wallet, amountInRaw, input.adminId);
 
   const held = await onChainBalance(input.chain, deployment.wusdt, wallet.address);
   if (held < BigInt(amountInRaw)) {
@@ -104,6 +147,8 @@ export async function liquidateForward(input: LiquidateForwardInput) {
   if (!/^0x[0-9a-fA-F]{40}$/.test(input.toExternal)) throw new Error("external address is not a valid EVM address");
 
   const amountInRaw = toRaw(input.amountHuman, deployment.wusdtDecimals);
+
+  await fundFromReserve(deployment, input.chain, wallet, amountInRaw, input.adminId);
 
   const held = await onChainBalance(input.chain, deployment.wusdt, wallet.address);
   if (held < BigInt(amountInRaw)) {
